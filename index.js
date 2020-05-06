@@ -49,20 +49,21 @@ exports.Form = Form;
 
 util.inherits(Form, stream.Writable);
 function Form(options) {
-  var opts = options || {}
+  var opts = options || {};
   var self = this;
   stream.Writable.call(self);
 
   self.error = null;
 
-  self.autoFields = !!opts.autoFields
-  self.autoFiles = !!opts.autoFiles
+  self.autoFields = !!opts.autoFields;
+  self.autoFiles = !!opts.autoFiles;
 
-  self.maxFields = opts.maxFields || 1000
-  self.maxFieldsSize = opts.maxFieldsSize || 2 * 1024 * 1024
-  self.maxFilesSize = opts.maxFilesSize || Infinity
-  self.uploadDir = opts.uploadDir || os.tmpdir()
-  self.encoding = opts.encoding || 'utf8'
+  self.maxFields = opts.maxFields || 1000;
+  self.maxFieldsSize = opts.maxFieldsSize || 2 * 1024 * 1024;
+  self.maxFilesSize = opts.maxFilesSize || Infinity;
+  self.uploadDir = opts.uploadDir || os.tmpdir();
+  self.encoding = opts.encoding || 'utf8';
+  self.logger = opts.logger || console;
 
   self.bytesReceived = 0;
   self.bytesExpected = null;
@@ -207,8 +208,17 @@ Form.prototype.parse = function(req, cb) {
 
     cleanupOpenFiles(self);
 
-    if (first) {
-      self.emit('error', err);
+    if (self.destStream) {
+        self.destStream.removeAllListeners('done');
+    }
+
+    if (first && self.listenerCount('error') > 0) {
+      try {
+        self.emit('error', err);
+      }
+      catch(emit_error){
+        self.logger.warn(`Multiparty failed to emit an 'error' event in 'handleError' [cause = ${error_message(emit_error)}]`);
+      }
     }
   }
 
@@ -480,6 +490,7 @@ Form.prototype.onParsePartEnd = function() {
     flushWriteCbs(this);
     var s = this.destStream;
     process.nextTick(function() {
+      s.emit('done');
       s.end();
     });
   }
@@ -506,6 +517,10 @@ Form.prototype.onParseHeadersEnd = function(offset) {
   }
 
   self.destStream = new stream.PassThrough();
+  self.destStream.on('error', function(err) {
+    self.logger.warn(`Multiparty PassThrough (ON 'error') [cause = ${error_message(err)}]`);
+    self.destStream.destroy();
+  });
   self.destStream.on('drain', function() {
     flushWriteCbs(self);
   });
@@ -609,7 +624,12 @@ function errorEventQueue(self, eventEmitter, err) {
   });
 
   if (items.length === 0) {
-    eventEmitter.emit('error', err);
+    try {
+      eventEmitter.emit('error', err);
+    }
+    catch(emit_error){
+      self.logger.warn(`Multiparty failed to emit an 'error' event in 'errorEventQueue' [cause = ${error_message(emit_error)}]`);
+    }
     return;
   }
 
@@ -627,7 +647,14 @@ function flushEmitQueue(self) {
 
     if (item.err) {
       // emit the delayed error
-      item.ee.emit('error', item.err);
+      if (item.ee && item.ee.listenerCount('error') > 0) {
+        try {
+          item.ee.emit('error', item.err);
+        }
+        catch(emit_error){
+          self.logger.warn(`Multiparty failed to emit an 'error' event in 'flushEmitQueue' [cause = ${error_message(emit_error)}]`);
+        }
+      }
     }
   }
 }
@@ -635,8 +662,9 @@ function flushEmitQueue(self) {
 function handlePart(self, partStream) {
   beginFlush(self);
   var emitAndReleaseHold = holdEmitQueue(self, partStream);
-  partStream.on('end', function() {
+  partStream.on('done', function() {
     endFlush(self);
+    partStream.removeAllListeners('done');
   });
   emitAndReleaseHold(function() {
     self.emit('part', partStream);
@@ -789,4 +817,8 @@ function parseFilename(headerValue) {
 
 function lower(c) {
   return c | 0x20;
+}
+
+function error_message(err) {
+    return (err && err.message && err.message.length > 0) ? err.message : 'unknown';
 }
