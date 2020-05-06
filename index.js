@@ -660,6 +660,7 @@ function handlePart(self, partStream) {
   var emitAndReleaseHold = holdEmitQueue(self, partStream);
   partStream.on('done', function() {
     endFlush(self);
+    partStream.removeAllListeners('done');
   });
   emitAndReleaseHold(function() {
     self.emit('part', partStream);
